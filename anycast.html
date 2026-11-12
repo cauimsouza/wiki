@@ -1,0 +1,577 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How anycast works</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap" rel="stylesheet">
+<style>
+/* Layout idea: one reading column (about 66ch) with figures allowed to run wider, like a well-set RFC. */
+:root {
+  --bg: #f3f6f5;
+  --panel: #ffffff;
+  --ink: #14211f;
+  --muted: #586966;
+  --line: #cdd7d4;
+  --accent: #0b6b5e;
+  --warn: #b3261e;
+  --s1: #0d8a7a;
+  --s2: #2f6fde;
+  --s3: #b0338f;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0f1716;
+    --panel: #172221;
+    --ink: #e3ecea;
+    --muted: #94a6a2;
+    --line: #2c3d3a;
+    --accent: #5fd0bd;
+    --warn: #ff8a80;
+    --s1: #3fc7b4;
+    --s2: #7aa7ff;
+    --s3: #e77cc8;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0f1716;
+  --panel: #172221;
+  --ink: #e3ecea;
+  --muted: #94a6a2;
+  --line: #2c3d3a;
+  --accent: #5fd0bd;
+  --warn: #ff8a80;
+  --s1: #3fc7b4;
+  --s2: #7aa7ff;
+  --s3: #e77cc8;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 17px;
+  line-height: 1.6;
+}
+main {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 56px 20px 80px;
+  display: flex;
+  flex-direction: column;
+  gap: 56px;
+}
+header, section { display: flex; flex-direction: column; gap: 16px; }
+header > *, section > * { margin: 0; }
+p, ul, ol, h1, h2, h3, .eyebrow, .note { max-width: 66ch; }
+h1, h2 { font-family: var(--font-display); font-weight: 600; text-wrap: balance; line-height: 1.15; }
+h1 { font-size: 2.6rem; letter-spacing: -0.01em; }
+h2 { font-size: 1.6rem; padding-top: 20px; border-top: 1px solid var(--line); max-width: none; }
+h3 { font-size: 1rem; font-weight: 600; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.8rem; color: var(--accent); letter-spacing: 0.04em; text-transform: uppercase; }
+.lede { font-size: 1.2rem; line-height: 1.5; }
+a { color: var(--accent); }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+ul, ol { padding-left: 1.2em; display: flex; flex-direction: column; gap: 8px; }
+code, .mono { font-family: var(--font-mono); font-size: 0.9em; }
+pre {
+  margin: 0;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  line-height: 1.55;
+  overflow-x: auto;
+}
+pre .c { color: var(--muted); }
+.note {
+  border-left: 3px solid var(--accent);
+  padding: 2px 0 2px 16px;
+  color: var(--muted);
+}
+
+figure {
+  margin: 8px 0;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+figure .scroll { overflow-x: auto; }
+figure svg { display: block; width: 100%; min-width: 560px; height: auto; color: var(--ink); }
+figcaption { font-size: 0.9rem; color: var(--muted); max-width: 72ch; }
+
+/* shared SVG marks */
+svg text { font-family: var(--font-body); font-size: 12px; fill: currentColor; }
+svg text.m { font-family: var(--font-mono); font-size: 11.5px; }
+svg text.t { font-family: var(--font-display); font-size: 15px; font-weight: 600; }
+svg text.dim { fill: var(--muted); }
+svg text.warn { fill: var(--warn); }
+svg .wire { stroke: currentColor; stroke-width: 1.5; fill: none; }
+svg .wire.warn { stroke: var(--warn); }
+svg .life { stroke: var(--line); stroke-width: 1.5; }
+svg .rule { stroke: var(--line); stroke-width: 1; }
+svg .dash { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 5 4; }
+svg .host { fill: var(--panel); stroke: currentColor; stroke-width: 1.5; }
+svg .srv { fill: color-mix(in srgb, var(--accent) 16%, var(--panel)); stroke: var(--accent); stroke-width: 1.5; }
+svg .ah { fill: currentColor; }
+svg .ah-warn { fill: var(--warn); }
+
+/* interactive network */
+.controls { display: flex; flex-wrap: wrap; gap: 12px 28px; align-items: center; }
+.group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.group .lbl { font-size: 0.85rem; color: var(--muted); margin-right: 4px; }
+button {
+  font: inherit;
+  font-size: 0.88rem;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  padding: 6px 12px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+button:hover { border-color: var(--muted); }
+button[aria-pressed="true"] { border-color: var(--ink); background: var(--panel); font-weight: 600; }
+button .sw { width: 10px; height: 10px; border-radius: 2px; background: var(--c); }
+button.site[aria-pressed="false"] { color: var(--muted); text-decoration: line-through; }
+button.site[aria-pressed="false"] .sw { background: transparent; outline: 1px dashed var(--muted); }
+.c1 { --c: var(--s1); } .c2 { --c: var(--s2); } .c3 { --c: var(--s3); }
+.readout {
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  padding: 10px 12px;
+  background: var(--bg);
+  border-radius: 5px;
+  min-height: 3.2em;
+}
+.readout b { font-weight: 500; color: var(--c, var(--ink)); }
+#net .edge { stroke: var(--line); stroke-width: 2; }
+#net .edge.dead { stroke-dasharray: 4 5; }
+#net .hop { stroke: var(--c); stroke-width: 5; stroke-linecap: round; }
+#net .shape { stroke: var(--c, var(--muted)); stroke-width: 2; fill: color-mix(in srgb, var(--c, transparent) 16%, var(--panel)); }
+#net .down .shape { stroke-dasharray: 4 4; fill: var(--panel); stroke: var(--muted); }
+#net .down text { fill: var(--muted); }
+#net .sel .shape { stroke-width: 4; }
+#net .click { cursor: pointer; }
+#net text { text-anchor: middle; dominant-baseline: central; }
+#net text.b { font-weight: 600; }
+
+table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+.tablewrap { overflow-x: auto; }
+th, td { text-align: left; padding: 10px 14px 10px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; font-size: 0.82rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+tr.hl td { font-weight: 500; }
+tr.hl td:first-child { color: var(--accent); }
+
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px 32px; }
+.pair > div { display: flex; flex-direction: column; gap: 8px; }
+.pair h3, .pair ul { margin: 0; }
+footer { font-size: 0.88rem; color: var(--muted); border-top: 1px solid var(--line); padding-top: 20px; }
+footer p { margin: 0 0 6px; }
+
+@media (max-width: 480px) {
+  h1 { font-size: 2rem; }
+  main { padding-top: 36px; gap: 44px; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<header>
+  <div class="eyebrow">IP routing explainer</div>
+  <h1>How anycast works</h1>
+  <p class="lede">Anycast means giving the <em>same</em> IP address to servers in many places and letting the Internet's routing deliver each packet to whichever one is closest to the sender.</p>
+  <p>You already know the unicast picture: one address names one host, and a UDP datagram addressed to it ends up at that host. Anycast keeps everything about the packet the same and changes only the assumption that an address lives in one place.</p>
+</header>
+
+<section>
+  <h2>One address, many locations</h2>
+  <p>With unicast, every client on Earth sends to the same machine, however far away it is. With anycast, several sites all claim the address. Each client's packets reach one of them, usually a nearby one, and the client cannot tell the difference.</p>
+
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 760 300" role="img" aria-label="Unicast sends four clients to one distant host. Anycast sends the same four clients to two nearer sites that share one address.">
+      <defs>
+        <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0 0 L10 5 L0 10 z"/></marker>
+      </defs>
+      <line class="rule" x1="380" y1="10" x2="380" y2="290"/>
+
+      <text class="t" x="20" y="24">Unicast</text>
+      <circle class="host" cx="60" cy="50" r="8"/>
+      <circle class="host" cx="60" cy="110" r="8"/>
+      <circle class="host" cx="60" cy="190" r="8"/>
+      <circle class="host" cx="60" cy="250" r="8"/>
+      <text class="dim" x="60" y="284" text-anchor="middle">clients</text>
+      <line class="wire" x1="72" y1="52" x2="276" y2="142" marker-end="url(#a1)"/>
+      <line class="wire" x1="72" y1="111" x2="276" y2="148" marker-end="url(#a1)"/>
+      <line class="wire" x1="72" y1="189" x2="276" y2="153" marker-end="url(#a1)"/>
+      <line class="wire" x1="72" y1="248" x2="276" y2="159" marker-end="url(#a1)"/>
+      <rect class="srv" x="280" y="130" width="48" height="40" rx="4"/>
+      <text class="m" x="304" y="192" text-anchor="middle">198.51.100.1</text>
+      <text class="dim" x="304" y="208" text-anchor="middle">one host</text>
+
+      <text class="t" x="400" y="24">Anycast</text>
+      <circle class="host" cx="460" cy="50" r="8"/>
+      <circle class="host" cx="460" cy="110" r="8"/>
+      <circle class="host" cx="460" cy="190" r="8"/>
+      <circle class="host" cx="460" cy="250" r="8"/>
+      <text class="dim" x="460" y="284" text-anchor="middle">clients</text>
+      <line class="wire" x1="472" y1="53" x2="592" y2="76" marker-end="url(#a1)"/>
+      <line class="wire" x1="472" y1="107" x2="592" y2="84" marker-end="url(#a1)"/>
+      <line class="wire" x1="472" y1="193" x2="592" y2="216" marker-end="url(#a1)"/>
+      <line class="wire" x1="472" y1="247" x2="592" y2="224" marker-end="url(#a1)"/>
+      <rect class="srv" x="596" y="60" width="48" height="40" rx="4"/>
+      <text x="620" y="84" text-anchor="middle">A</text>
+      <text class="m" x="620" y="118" text-anchor="middle">198.51.100.1</text>
+      <rect class="srv" x="596" y="200" width="48" height="40" rx="4"/>
+      <text x="620" y="224" text-anchor="middle">B</text>
+      <text class="m" x="620" y="258" text-anchor="middle">198.51.100.1</text>
+    </svg>
+    </div>
+    <figcaption>The same four clients send to the same destination address in both halves. On the right, two sites hold that address and each client reaches the nearer one.</figcaption>
+  </figure>
+
+  <p>Nothing in the packet marks it as anycast. The IP header and the UDP header are byte for byte what they would be for a unicast destination. There is no special address range and no flag. Anycast exists entirely in how routers have been told to reach that address.</p>
+
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>Scheme</th><th>An address names</th><th>A packet is delivered to</th></tr></thead>
+    <tbody>
+      <tr><td>Unicast</td><td>one host</td><td>that host</td></tr>
+      <tr><td>Broadcast</td><td>every host on a link</td><td>all of them</td></tr>
+      <tr><td>Multicast</td><td>a group of subscribed hosts</td><td>all members of the group</td></tr>
+      <tr class="hl"><td>Anycast</td><td>a set of equivalent hosts</td><td>exactly one of them, chosen by routing</td></tr>
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section>
+  <h2>The mechanism is BGP</h2>
+  <p>The Internet is a mesh of independently run networks called autonomous systems (ASes). They tell each other which address blocks they can reach using BGP. An announcement says, in effect, "send traffic for <code>198.51.100.0/24</code> my way", and each network passes it on to its neighbours with its own AS number added to the path.</p>
+  <p>Normally one site announces a given prefix. To anycast it, you announce the <strong>same prefix from every site</strong>. Routers elsewhere now hear several routes to one destination. That is routine for BGP, which always hears multiple paths and keeps the one it prefers. Each router then forwards packets along its own best route, with no idea that different routers' best routes end at different machines.</p>
+  <p>Try it. Pick a client to trace its path, and withdraw a site's announcement to see the network re-converge.</p>
+
+  <figure>
+    <div class="controls">
+      <div class="group" role="group" aria-label="Client to trace">
+        <span class="lbl">Trace from</span>
+        <button type="button" id="btn-A" data-client="A">Client A</button>
+        <button type="button" id="btn-B" data-client="B">Client B</button>
+        <button type="button" id="btn-C" data-client="C">Client C</button>
+        <button type="button" id="btn-D" data-client="D">Client D</button>
+      </div>
+      <div class="group" role="group" aria-label="Sites announcing the prefix">
+        <span class="lbl">Announcing</span>
+        <button type="button" class="site c1" id="btn-S1" data-site="S1"><span class="sw"></span>Site 1</button>
+        <button type="button" class="site c2" id="btn-S2" data-site="S2"><span class="sw"></span>Site 2</button>
+        <button type="button" class="site c3" id="btn-S3" data-site="S3"><span class="sw"></span>Site 3</button>
+      </div>
+    </div>
+    <div class="scroll">
+      <svg id="net" viewBox="0 0 760 425" role="img" aria-label="A network of six routers, four clients and three anycast sites. Each router forwards toward the site with the shortest path."></svg>
+    </div>
+    <div class="readout" id="readout" aria-live="polite"></div>
+    <figcaption>Circles marked R are routers (think one AS each). All three sites announce <span class="mono">198.51.100.0/24</span>. Each router keeps the shortest route it heard, and its colour shows which site that route leads to. The region that drains to one site is called that site's <em>catchment</em>.</figcaption>
+  </figure>
+
+  <h3>What "closest" means</h3>
+  <p>Closest is measured by routing preference, and geography only correlates with it. A BGP router compares candidate routes roughly in this order:</p>
+  <ol>
+    <li><strong>Local policy.</strong> Operators rank routes by business relationship first. A route through a customer or a free peering link usually beats one through a paid transit provider, whatever its length.</li>
+    <li><strong>AS path length.</strong> Fewer networks to cross wins. This is the hop count the diagram uses.</li>
+    <li><strong>Tie-breakers.</strong> Among equal routes, the router prefers the exit that is cheapest to reach inside its own network.</li>
+  </ol>
+  <p>The result tracks physical distance well enough to be useful, but a client can be sent to a site on another continent because its ISP's cheapest path happens to lead there. Anycast operators spend real effort measuring catchments and tuning announcements to fix cases like that.</p>
+</section>
+
+<section>
+  <h2>What happens to a UDP exchange</h2>
+  <p>Take a DNS query to an anycast resolver. On the wire it looks like any UDP request and response:</p>
+<pre><span class="c"># client to service: routed by anycast, lands at the nearest site</span>
+203.0.113.7:53124  →  198.51.100.1:53     query
+
+<span class="c"># service to client: ordinary unicast back to the client's own address</span>
+198.51.100.1:53    →  203.0.113.7:53124   answer</pre>
+  <p>Two details matter here.</p>
+  <ul>
+    <li><strong>The reply must come from the anycast address.</strong> The client matches the answer to its socket by source address and port, so the site answers as <code>198.51.100.1</code> even though the machine also has a private unicast address of its own. A server listening on a wildcard UDP socket has to take care to reply from the address the query arrived on (for example with <code>IP_PKTINFO</code>), or the kernel may pick a different source.</li>
+    <li><strong>Only the inbound direction is anycast.</strong> The client's address is unique, so the reply takes a normal unicast route. The two directions can cross different networks.</li>
+  </ul>
+  <p>The same asymmetry explains why sites never <em>originate</em> conversations from the anycast address. If Site 1 sent a request with source <code>198.51.100.1</code>, the response would go to whichever site is nearest the responder, which may be Site 2. Each machine keeps a unique unicast address for its own outbound traffic and for management.</p>
+
+  <h3>Why stateless UDP services fit so well</h3>
+  <p>Routes shift now and then: a link fails, an operator changes policy, a site is withdrawn. When that happens, a client's next packet may land at a different site from its last one. Whether that hurts depends on whether the sites need to remember anything about the client.</p>
+
+  <figure>
+    <div class="scroll">
+    <svg viewBox="0 0 760 320" role="img" aria-label="Sequence diagrams. A UDP query after a route change is answered by Site 2 without trouble. A TCP segment after a route change reaches Site 2, which has no record of the connection and resets it.">
+      <defs>
+        <marker id="a3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah" d="M0 0 L10 5 L0 10 z"/></marker>
+        <marker id="a3w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="ah-warn" d="M0 0 L10 5 L0 10 z"/></marker>
+      </defs>
+      <line class="rule" x1="380" y1="10" x2="380" y2="310"/>
+
+      <!-- UDP -->
+      <text class="t" x="20" y="24">UDP request and response</text>
+      <text x="60" y="54" text-anchor="middle">Client</text>
+      <text x="210" y="54" text-anchor="middle">Site 1</text>
+      <text x="330" y="54" text-anchor="middle">Site 2</text>
+      <line class="life" x1="60" y1="64" x2="60" y2="262"/>
+      <line class="life" x1="210" y1="64" x2="210" y2="262"/>
+      <line class="life" x1="330" y1="64" x2="330" y2="262"/>
+      <text class="m" x="72" y="84">query 1</text>
+      <line class="wire" x1="60" y1="92" x2="208" y2="92" marker-end="url(#a3)"/>
+      <text class="m" x="72" y="114">answer</text>
+      <line class="wire" x1="210" y1="122" x2="62" y2="122" marker-end="url(#a3)"/>
+      <line class="dash" x1="20" y1="160" x2="360" y2="160"/>
+      <text class="dim" x="20" y="152">route changes</text>
+      <text class="m" x="72" y="194">query 2</text>
+      <line class="wire" x1="60" y1="202" x2="328" y2="202" marker-end="url(#a3)"/>
+      <text class="m" x="72" y="224">answer</text>
+      <line class="wire" x1="330" y1="232" x2="62" y2="232" marker-end="url(#a3)"/>
+      <text x="20" y="292">Fine. Each datagram stands alone.</text>
+
+      <!-- TCP -->
+      <text class="t" x="400" y="24">TCP connection</text>
+      <text x="440" y="54" text-anchor="middle">Client</text>
+      <text x="590" y="54" text-anchor="middle">Site 1</text>
+      <text x="710" y="54" text-anchor="middle">Site 2</text>
+      <line class="life" x1="440" y1="64" x2="440" y2="262"/>
+      <line class="life" x1="590" y1="64" x2="590" y2="262"/>
+      <line class="life" x1="710" y1="64" x2="710" y2="262"/>
+      <text class="m" x="452" y="84">SYN</text>
+      <line class="wire" x1="440" y1="92" x2="588" y2="92" marker-end="url(#a3)"/>
+      <text class="m" x="452" y="114">SYN-ACK</text>
+      <line class="wire" x1="590" y1="122" x2="442" y2="122" marker-end="url(#a3)"/>
+      <line class="dash" x1="400" y1="160" x2="740" y2="160"/>
+      <text class="dim" x="400" y="152">route changes</text>
+      <text class="m" x="452" y="194">data</text>
+      <line class="wire" x1="440" y1="202" x2="708" y2="202" marker-end="url(#a3)"/>
+      <text class="m warn" x="452" y="224">RST</text>
+      <line class="wire warn" x1="710" y1="232" x2="442" y2="232" marker-end="url(#a3w)"/>
+      <text class="warn" x="400" y="292">Broken. Site 2 has no record of this connection.</text>
+    </svg>
+    </div>
+    <figcaption>A route change between two packets is invisible to a one-shot UDP exchange and fatal to a connection whose state lives at the first site.</figcaption>
+  </figure>
+
+  <p>A DNS lookup is one datagram each way, and every site can answer it identically, so anycast and DNS over UDP suit each other perfectly. Protocols that build sessions on top of UDP, such as QUIC, inherit the TCP problem because the session state again lives at one site.</p>
+  <p>In practice, routes on the Internet are stable for hours or days, far longer than most connections last. That is why CDNs run TCP and QUIC over anycast at enormous scale. Routers also keep each flow on one path when several are equally good, by hashing the address and port tuple, so packets of one connection do not get sprayed across sites.</p>
+</section>
+
+<section>
+  <h2>Failure and withdrawal</h2>
+  <p>Withdrawing Site 1 in the diagram above shows anycast's failover. The site stops announcing the prefix, its neighbours drop that route and tell their neighbours, and within seconds to a few minutes every router has settled on the next-best site. Clients do nothing. They keep sending to the same address.</p>
+  <p>The catch is that BGP only knows whether the <em>announcement</em> is present. A site whose service has crashed but whose router is still announcing becomes a black hole for its whole catchment. Every anycast deployment therefore ties the announcement to a health check: if the service stops answering, the site withdraws its own route.</p>
+  <p class="note">Operators use the same lever on purpose. To drain a site for maintenance they withdraw the prefix there, wait for traffic to move, and do the work.</p>
+</section>
+
+<section>
+  <h2>Where it is used, and what it costs</h2>
+  <div class="pair">
+    <div>
+      <h3>Good at</h3>
+      <ul>
+        <li><strong>Latency.</strong> Clients reach a nearby site with no lookup step and no client logic.</li>
+        <li><strong>Resilience.</strong> A site can vanish and its clients are rerouted by the network itself.</li>
+        <li><strong>Absorbing floods.</strong> Attack traffic is split by where it originates, so each site faces only its own catchment's share.</li>
+        <li><strong>One address to configure.</strong> This is why public resolvers can hand out memorable addresses such as <code>1.1.1.1</code>, <code>8.8.8.8</code> and <code>9.9.9.9</code>, and why the DNS root can run on 13 named server addresses backed by well over a thousand machines worldwide.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Trade-offs</h3>
+      <ul>
+        <li><strong>No direct control.</strong> Other networks' policies decide which site a client reaches. You can nudge catchments but cannot assign clients.</li>
+        <li><strong>Uneven load.</strong> Catchments follow topology, so one site may get most of the traffic.</li>
+        <li><strong>Harder debugging.</strong> "The server" is a different machine depending on where you ask from. Operators expose an identity query for this, such as <code>dig CH TXT id.server @1.1.1.1</code>.</li>
+        <li><strong>Stray ICMP.</strong> Error messages addressed to the anycast address, such as "packet too big", can land at a different site from the one that sent the original packet.</li>
+        <li><strong>Address cost.</strong> Networks generally ignore announcements smaller than a <code>/24</code> in IPv4 or a <code>/48</code> in IPv6, so an anycast service needs a whole block of that size.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>The short version</h2>
+  <ul>
+    <li>An anycast address is an ordinary address announced from several places at once.</li>
+    <li>BGP routers each pick their preferred route, so packets drain toward the topologically nearest site.</li>
+    <li>The client sends plain unicast-looking UDP and gets a reply from the same address. It never learns which site answered.</li>
+    <li>Stateless request and response protocols are unaffected by route changes. Connection-oriented ones can be reset by them, which is rare enough in practice to be acceptable.</li>
+    <li>Failover is a route withdrawal, and it only works if the announcement tracks the health of the service.</li>
+  </ul>
+</section>
+
+<footer>
+  <p>Addresses on this page come from the ranges reserved for documentation (<span class="mono">198.51.100.0/24</span> and <span class="mono">203.0.113.0/24</span>).</p>
+  <p>Further reading: RFC 4786, "Operation of Anycast Services", and RFC 1546, the original 1993 proposal.</p>
+</footer>
+
+</main>
+
+<script>
+(function () {
+  var NODES = {
+    S1: { x: 130, y: 60,  kind: 'site', label: 'Site 1', cls: 'c1' },
+    S2: { x: 630, y: 60,  kind: 'site', label: 'Site 2', cls: 'c2' },
+    S3: { x: 380, y: 360, kind: 'site', label: 'Site 3', cls: 'c3' },
+    R1: { x: 130, y: 190, kind: 'router' },
+    R2: { x: 290, y: 130, kind: 'router' },
+    R3: { x: 470, y: 130, kind: 'router' },
+    R4: { x: 630, y: 190, kind: 'router' },
+    R5: { x: 290, y: 270, kind: 'router' },
+    R6: { x: 470, y: 270, kind: 'router' },
+    A:  { x: 40,  y: 260, kind: 'client' },
+    B:  { x: 380, y: 50,  kind: 'client' },
+    C:  { x: 720, y: 260, kind: 'client' },
+    D:  { x: 190, y: 350, kind: 'client' }
+  };
+  var EDGES = [
+    ['S1','R1'],['S1','R2'],['S2','R3'],['S2','R4'],['S3','R5'],['S3','R6'],
+    ['R1','R2'],['R2','R3'],['R3','R4'],['R1','R5'],['R5','R6'],['R6','R4'],
+    ['R2','R5'],['R3','R6'],
+    ['A','R1'],['B','R3'],['C','R4'],['D','R5']
+  ];
+  var SITES = ['S1','S2','S3'];
+  var state = { client: 'A', up: { S1: true, S2: true, S3: true } };
+
+  function neighbours(id) {
+    var out = [];
+    EDGES.forEach(function (e) {
+      if (e[0] === id) out.push(e[1]);
+      if (e[1] === id) out.push(e[0]);
+    });
+    return out;
+  }
+
+  // Breadth-first search outward from every announcing site: the route
+  // announcement spreading through the network, one hop at a time.
+  function routes() {
+    var r = {}, queue = [];
+    SITES.forEach(function (s) {
+      if (state.up[s]) { r[s] = { site: s, next: null, dist: 0 }; queue.push(s); }
+    });
+    while (queue.length) {
+      var cur = queue.shift();
+      if (NODES[cur].kind === 'client') continue; // clients do not forward
+      neighbours(cur).forEach(function (n) {
+        if (r[n] || NODES[n].kind === 'site') return;
+        r[n] = { site: r[cur].site, next: cur, dist: r[cur].dist + 1 };
+        queue.push(n);
+      });
+    }
+    return r;
+  }
+
+  function pathFrom(id, r) {
+    var p = [id];
+    while (r[id] && r[id].next) { id = r[id].next; p.push(id); }
+    return r[p[0]] ? p : null;
+  }
+
+  function render() {
+    var r = routes();
+    var path = pathFrom(state.client, r);
+    var onPath = {};
+    if (path) for (var i = 0; i < path.length - 1; i++) {
+      onPath[path[i] + '-' + path[i + 1]] = onPath[path[i + 1] + '-' + path[i]] = true;
+    }
+    var siteCls = path ? NODES[r[state.client].site].cls : '';
+    var h = '';
+
+    EDGES.forEach(function (e) {
+      var a = NODES[e[0]], b = NODES[e[1]];
+      var dead = (a.kind === 'site' && !state.up[e[0]]) || (b.kind === 'site' && !state.up[e[1]]);
+      h += '<line class="edge' + (dead ? ' dead' : '') + '" x1="' + a.x + '" y1="' + a.y + '" x2="' + b.x + '" y2="' + b.y + '"/>';
+    });
+    EDGES.forEach(function (e) {
+      if (!onPath[e[0] + '-' + e[1]]) return;
+      var a = NODES[e[0]], b = NODES[e[1]];
+      h += '<line class="hop ' + siteCls + '" x1="' + a.x + '" y1="' + a.y + '" x2="' + b.x + '" y2="' + b.y + '"/>';
+    });
+
+    Object.keys(NODES).forEach(function (id) {
+      var n = NODES[id];
+      var cls = r[id] ? NODES[r[id].site].cls : '';
+      if (n.kind === 'site') {
+        var up = state.up[id];
+        var ly = n.y < 200 ? n.y - 36 : n.y + 38;
+        h += '<g class="click ' + (up ? n.cls : 'down') + '" data-site="' + id + '">' +
+             '<rect class="shape" x="' + (n.x - 36) + '" y="' + (n.y - 22) + '" width="72" height="44" rx="5"/>' +
+             '<text class="b" x="' + n.x + '" y="' + n.y + '">' + n.label + '</text>' +
+             '<text class="m' + (up ? '' : ' dim') + '" x="' + n.x + '" y="' + ly + '">' +
+             (up ? 'announces 198.51.100.0/24' : 'withdrawn') + '</text></g>';
+      } else if (n.kind === 'router') {
+        h += '<g class="' + cls + '"><circle class="shape" cx="' + n.x + '" cy="' + n.y + '" r="17"/>' +
+             '<text x="' + n.x + '" y="' + n.y + '">' + id + '</text></g>';
+      } else {
+        h += '<g class="click ' + cls + (id === state.client ? ' sel' : '') + '" data-client="' + id + '">' +
+             '<circle class="shape" cx="' + n.x + '" cy="' + n.y + '" r="13"/>' +
+             '<text class="b" x="' + n.x + '" y="' + n.y + '">' + id + '</text>' +
+             '<text class="dim" x="' + n.x + '" y="' + (n.y + 27) + '">client</text></g>';
+      }
+    });
+    document.getElementById('net').innerHTML = h;
+
+    var out = document.getElementById('readout');
+    if (path) {
+      var names = path.map(function (id) {
+        var n = NODES[id];
+        return n.kind === 'site' ? n.label : (n.kind === 'client' ? 'Client ' + id : id);
+      });
+      var hops = path.length - 1;
+      out.className = 'readout ' + siteCls;
+      out.innerHTML = names.slice(0, -1).join(' → ') + ' → <b>' + names[names.length - 1] + '</b><br>' +
+        hops + ' hops to 198.51.100.1. Every router on the way did an ordinary lookup for that address.';
+    } else {
+      out.className = 'readout';
+      out.innerHTML = 'Client ' + state.client + ' → no route<br>No site is announcing the prefix, so routers have nowhere to send 198.51.100.1 and drop the packets.';
+    }
+
+    ['A','B','C','D'].forEach(function (c) {
+      document.getElementById('btn-' + c).setAttribute('aria-pressed', String(c === state.client));
+    });
+    SITES.forEach(function (s) {
+      document.getElementById('btn-' + s).setAttribute('aria-pressed', String(state.up[s]));
+    });
+  }
+
+  function act(el) {
+    if (!el) return;
+    if (el.dataset.client) state.client = el.dataset.client;
+    else if (el.dataset.site) state.up[el.dataset.site] = !state.up[el.dataset.site];
+    else return;
+    render();
+  }
+  document.querySelector('.controls').addEventListener('click', function (ev) {
+    act(ev.target.closest('button'));
+  });
+  document.getElementById('net').addEventListener('click', function (ev) {
+    act(ev.target.closest('[data-client],[data-site]'));
+  });
+  render();
+})();
+</script>
+</body>
+</html>
